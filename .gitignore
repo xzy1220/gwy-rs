@@ -19,6 +19,10 @@ venv/
 *.swo
 *~
 data/raw/
+data/*.xlsx
+data/*.xls
+*.xlsx
+*.xls
 *.pyc
 *.exe
 *.bat
