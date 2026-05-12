@@ -557,10 +557,14 @@ for col in allowed_columns:
                 return any(city in x_str for city in selected_cities)
             city_mask = filtered_df[col].apply(match_city)
             filtered_df = filtered_df[city_mask]
+            cities_str = "、".join(selected_cities)
             if selected_region:
-                selected_region += " " + "、".join(selected_cities)
+                for prov in selected_provinces:
+                    cities_str = cities_str.replace(prov, "")
+                cities_str = cities_str.replace("、、", "、").strip("、")
+                selected_region += " " + cities_str
             else:
-                selected_region = "、".join(selected_cities)
+                selected_region = cities_str
         
         # 提取区县
         def extract_district(loc):
@@ -807,35 +811,35 @@ if len(final_df) > 0 and calculation_data is not None:
         all_cols = ['进面分数', '招考人数', '专业要求数', '机构层级', '学历匹配度', '备注限制数']
         critic_df = pd.DataFrame({
             'Indicator': all_cols,
-            'StdDev': [calculation_data['std_devs'].get(col, 0) for col in all_cols],
-            '1-CorrSum': [calculation_data['corr_terms'].get(col, 0) for col in all_cols],
-            'CRITIC': [calculation_data['critic_values'].get(col, 0) for col in all_cols],
-            'Weight': [calculation_data['final_weights'].get(col, 0) for col in all_cols],
-            'Weight%': [round(calculation_data['final_weights'].get(col, 0) * 100, 2) for col in all_cols]
+            'StdDev': [round(calculation_data['std_devs'].get(col, 0), 4) for col in all_cols],
+            '1-CorrSum': [round(calculation_data['corr_terms'].get(col, 0), 4) for col in all_cols],
+            'CRITIC': [round(calculation_data['critic_values'].get(col, 0), 4) for col in all_cols],
+            'Weight': [round(calculation_data['final_weights'].get(col, 0), 4) for col in all_cols],
+            'Weight%': [round(calculation_data['final_weights'].get(col, 0) * 100, 4) for col in all_cols]
         })
         critic_df.to_excel(writer, sheet_name='CRITIC权重计算', index=False)
         
         # 4. 原始指标
-        raw_df = calculation_data['raw_indicators'].copy()
+        raw_df = calculation_data['raw_indicators'].copy().round(4)
         raw_df.insert(0, '排名', range(1, len(raw_df) + 1))
         raw_df.to_excel(writer, sheet_name='原始指标', index=False)
         
         # 5. 标准化指标
-        norm_df = calculation_data['normalized'].copy()
+        norm_df = calculation_data['normalized'].copy().round(4)
         norm_df.insert(0, '排名', range(1, len(norm_df) + 1))
         norm_df.to_excel(writer, sheet_name='标准化指标', index=False)
         
         # 6. 加权指标
-        weighted_df = calculation_data['weighted'].copy()
+        weighted_df = calculation_data['weighted'].copy().round(4)
         weighted_df.insert(0, '排名', range(1, len(weighted_df) + 1))
         weighted_df.to_excel(writer, sheet_name='加权指标', index=False)
         
         # 7. TOPSIS计算
         topsis_df = pd.DataFrame({
             '排名': range(1, len(final_df) + 1),
-            'D+': calculation_data['d_positive'],
-            'D-': calculation_data['d_negative'],
-            'C': calculation_data['closeness'],
+            'D+': calculation_data['d_positive'].round(4),
+            'D-': calculation_data['d_negative'].round(4),
+            'C': calculation_data['closeness'].round(4),
             '推荐分': final_df['推荐分'].values
         })
         topsis_df.to_excel(writer, sheet_name='TOPSIS计算', index=False)
@@ -843,8 +847,8 @@ if len(final_df) > 0 and calculation_data is not None:
         # 8. 正负理想解
         ideal_df = pd.DataFrame({
             'Indicator': all_cols,
-            'PositiveIdeal': [calculation_data['positive_ideal'].get(col, 0) for col in all_cols],
-            'NegativeIdeal': [calculation_data['negative_ideal'].get(col, 0) for col in all_cols]
+            'PositiveIdeal': [round(calculation_data['positive_ideal'].get(col, 0), 4) for col in all_cols],
+            'NegativeIdeal': [round(calculation_data['negative_ideal'].get(col, 0), 4) for col in all_cols]
         })
         ideal_df.to_excel(writer, sheet_name='正负理想解', index=False)
     
