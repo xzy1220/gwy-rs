@@ -476,8 +476,16 @@ user_pol = st.sidebar.selectbox(
     key="user_pol"
 )
 
+# 用户性别选择
+user_gender = st.sidebar.selectbox(
+    "我的性别",
+    options=["请选择", "男", "女"],
+    index=0,
+    key="user_gender"
+)
+
 st.sidebar.markdown("---")
-st.sidebar.subheader("�� 数据概览")
+st.sidebar.subheader("📊 数据概览")
 st.sidebar.info(f"📈 总岗位数: {len(df)}")
 st.sidebar.info(f"📊 数据列数: {len(df.columns)}")
 if not merge_option:
@@ -553,7 +561,36 @@ if user_pol != "请选择" and "政治面貌" in filtered_df.columns:
     pol_mask = filtered_df["政治面貌"].apply(is_pol_qualified)
     filtered_df = filtered_df[pol_mask]
 
-# 只保留以下筛选列（学历和政治面貌已通过智能匹配处理）
+# 智能匹配：性别
+if user_gender != "请选择" and "备注" in filtered_df.columns:
+    
+    def is_gender_qualified(remark):
+        if pd.isna(remark):
+            return True
+        remark_str = str(remark).strip()
+        
+        # 不限性别（没有性别限制关键词）
+        male_keywords = ["限男性", "仅限男性", "男性，", "，男性", "限男", "仅男"]
+        female_keywords = ["限女性", "仅限女性", "女性，", "，女性", "限女", "仅女"]
+        
+        has_male_restrict = any(keyword in remark_str for keyword in male_keywords)
+        has_female_restrict = any(keyword in remark_str for keyword in female_keywords)
+        
+        if user_gender == "男":
+            # 用户是男性，只要不限女性或限男性都可以
+            if has_female_restrict:
+                return False
+            return True
+        else:  # 用户是女性
+            # 用户是女性，只要不限男性或限女性都可以
+            if has_male_restrict:
+                return False
+            return True
+    
+    gender_mask = filtered_df["备注"].apply(is_gender_qualified)
+    filtered_df = filtered_df[gender_mask]
+
+# 只保留以下筛选列（学历、政治面貌、性别已通过智能匹配处理）
 allowed_columns = ["专业", "基层工作最低年限", "工作地点"]
 
 # 文本搜索列（包含搜索）
