@@ -19,6 +19,7 @@ venv/
 *.swo
 *~
 data/raw/
+data/cache/
 data/*.xlsx
 data/*.xls
 *.xlsx
@@ -27,8 +28,7 @@ data/*.xls
 *.exe
 *.bat
 *.sh
-!start_docker.bat
-!start_docker.sh
+!运行预处理.bat
 Dockerfile
 docker-compose.yml
 .dockerignore
