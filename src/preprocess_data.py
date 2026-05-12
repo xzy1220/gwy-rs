@@ -254,45 +254,6 @@ for file in files:
         merged_df['专业要求数_本科'] = major_data[2]
         merged_df['专业要求数_研究生'] = major_data[3]
         merged_df['专业要求数_博士'] = major_data[4]
-        
-        # 根据学历要求，将不符合学历层次的专业要求数设为0
-        if '学历映射' in merged_df.columns:
-            def adjust_major_counts(row):
-                edu_json = row['学历映射']
-                try:
-                    allowed_levels = json.loads(edu_json)
-                except:
-                    allowed_levels = [1, 2, 3, 4]
-                
-                # 检查每个学历层次是否被允许
-                dc_allowed = 1 in allowed_levels
-                bk_allowed = 2 in allowed_levels
-                yjs_allowed = 3 in allowed_levels
-                bs_allowed = 4 in allowed_levels
-                
-                # 获取当前的专业要求数
-                dc_count = row['专业要求数_大专']
-                bk_count = row['专业要求数_本科']
-                yjs_count = row['专业要求数_研究生']
-                bs_count = row['专业要求数_博士']
-                
-                # 将不允许的学历层次设为0
-                if not dc_allowed:
-                    dc_count = 0
-                if not bk_allowed:
-                    bk_count = 0
-                if not yjs_allowed:
-                    yjs_count = 0
-                if not bs_allowed:
-                    bs_count = 0
-                
-                return dc_count, bk_count, yjs_count, bs_count
-            
-            adjusted_majors = merged_df.apply(adjust_major_counts, axis=1, result_type='expand')
-            merged_df['专业要求数_大专'] = adjusted_majors[0]
-            merged_df['专业要求数_本科'] = adjusted_majors[1]
-            merged_df['专业要求数_研究生'] = adjusted_majors[2]
-            merged_df['专业要求数_博士'] = adjusted_majors[3]
     
     # 4. 机构层级映射列
     if '机构层级' in merged_df.columns:

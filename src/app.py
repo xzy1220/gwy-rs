@@ -99,15 +99,17 @@ def get_available_years():
     return sorted(years)
 
 @st.cache_data(ttl=1800, show_spinner="正在计算推荐分数...")
-def calculate_recommendation_scores(df, user_edu=None, user_pol=None):
+def calculate_recommendation_scores(df, user_edu=None, user_pol=None, user_gender=None, selected_region=None, selected_major=None, selected_work_years=None):
     """
     使用 CRITIC + TOPSIS 计算推荐分数
+    返回：result_df, score_details, weights_info, calculation_data
+    其中 calculation_data 包含所有中间计算数据用于导出Excel
     """
     if len(df) < 2:
         result_df = df.copy()
         result_df['推荐分'] = 5.0
         result_df['排名'] = 1
-        return result_df, None, None
+        return result_df, None, None, None
     
     df = df.copy().reset_index(drop=True)
     
@@ -283,6 +285,9 @@ def calculate_recommendation_scores(df, user_edu=None, user_pol=None):
     raw_indicators = raw_indicators.loc[sorted_indices].reset_index(drop=True)
     normalized = normalized.loc[sorted_indices].reset_index(drop=True)
     weighted = weighted.loc[sorted_indices].reset_index(drop=True)
+    d_positive = d_positive.loc[sorted_indices].reset_index(drop=True)
+    d_negative = d_negative.loc[sorted_indices].reset_index(drop=True)
+    closeness = closeness.loc[sorted_indices].reset_index(drop=True)
     
     df['排名'] = range(1, len(df) + 1)
     
@@ -329,7 +334,33 @@ def calculate_recommendation_scores(df, user_edu=None, user_pol=None):
         'CRITIC权重': [round(final_weights[col] * 100, 1) if col in final_weights else 0 for col in all_cols]
     }
     
-    return df, score_details, weights_info
+    # 准备所有计算数据用于导出
+    calculation_data = {
+        'user_info': {
+            'Gender': user_gender if user_gender and user_gender != "请选择" else "未选择",
+            'Education': user_edu if user_edu and user_edu != "请选择" else "未选择",
+            'Political': user_pol if user_pol and user_pol != "请选择" else "未选择",
+            'Region': selected_region if selected_region else "未选择",
+            'Major': selected_major if selected_major else "未选择",
+            'WorkYears': selected_work_years if selected_work_years else "未选择",
+            'Positions': len(df)
+        },
+        'raw_indicators': raw_indicators.copy(),
+        'normalized': normalized.copy(),
+        'weighted': weighted.copy(),
+        'final_weights': final_weights.copy(),
+        'std_devs': std_devs.copy(),
+        'corr_terms': corr_terms.copy(),
+        'critic_values': critic_values.copy(),
+        'positive_ideal': positive_ideal.copy(),
+        'negative_ideal': negative_ideal.copy(),
+        'd_positive': d_positive.copy(),
+        'd_negative': d_negative.copy(),
+        'closeness': closeness.copy(),
+        'original_df': df.copy()
+    }
+    
+    return df, score_details, weights_info, calculation_data
 
 # ==================== 主程序开始 ====================
 
@@ -449,6 +480,11 @@ if user_gender != "请选择" and '性别要求' in filtered_df.columns:
 
 # ==================== 其他筛选模块 ====================
 
+# 存储用户筛选信息用于导出
+selected_region = ""
+selected_major = ""
+selected_work_years = ""
+
 allowed_columns = ["专业", "基层工作最低年限", "工作地点"]
 text_search_columns = ["专业"]
 
@@ -489,6 +525,7 @@ for col in allowed_columns:
                 return any(prov in x_str for prov in selected_provinces)
             province_mask = filtered_df[col].apply(match_province)
             filtered_df = filtered_df[province_mask]
+            selected_region = "、".join(selected_provinces)
         
         # 提取市
         def extract_city(loc):
@@ -520,6 +557,10 @@ for col in allowed_columns:
                 return any(city in x_str for city in selected_cities)
             city_mask = filtered_df[col].apply(match_city)
             filtered_df = filtered_df[city_mask]
+            if selected_region:
+                selected_region += " " + "、".join(selected_cities)
+            else:
+                selected_region = "、".join(selected_cities)
         
         # 提取区县
         def extract_district(loc):
@@ -556,6 +597,10 @@ for col in allowed_columns:
                 return any(dist in x_str for dist in selected_districts)
             district_mask = filtered_df[col].apply(match_district)
             filtered_df = filtered_df[district_mask]
+            if selected_region:
+                selected_region += " " + "、".join(selected_districts)
+            else:
+                selected_region = "、".join(selected_districts)
         
         st.sidebar.markdown("---")
     
@@ -568,6 +613,7 @@ for col in allowed_columns:
         )
         if search_value:
             filtered_df = filtered_df[filtered_df[col].astype(str).str.contains(search_value, case=False, na=False)]
+            selected_major = search_value
     
     else:
         # 基层工作最低年限等
@@ -589,6 +635,8 @@ for col in allowed_columns:
             )
             if selected:
                 filtered_df = filtered_df[filtered_df[col].isin(selected)]
+                if col == "基层工作最低年限":
+                    selected_work_years = "、".join(selected)
         elif df[col].dtype in ['int64', 'float64']:
             min_val = float(df[col].min())
             max_val = float(df[col].max())
@@ -674,8 +722,11 @@ final_df = display_df[~display_df.index.isin(st.session_state.deleted_rows)]
 # 计算推荐分数
 score_details = None
 weights_info = None
+calculation_data = None
 if len(final_df) > 0:
-    final_df, score_details, weights_info = calculate_recommendation_scores(final_df, user_edu, user_pol)
+    final_df, score_details, weights_info, calculation_data = calculate_recommendation_scores(
+        final_df, user_edu, user_pol, user_gender, selected_region, selected_major, selected_work_years
+    )
     cols = ['排名', '推荐分'] + [col for col in final_df.columns if col not in ['排名', '推荐分']]
     final_df = final_df[cols]
 
@@ -683,16 +734,8 @@ st.markdown("---")
 st.subheader(f"📊 最终结果（{len(final_df)} 个岗位）")
 final_display_columns = [col for col in final_df.columns if col not in hide_columns]
 
-# 分页显示
-page_size = st.sidebar.slider("每页显示行数", min_value=10, max_value=100, value=50, step=10)
-total_pages = (len(final_df) + page_size - 1) // page_size
-if total_pages > 1:
-    page_num = st.selectbox(f"选择页码（共 {total_pages} 页）", range(1, total_pages + 1))
-    start_idx = (page_num - 1) * page_size
-    end_idx = min(page_num * page_size, len(final_df))
-    st.dataframe(final_df[final_display_columns].iloc[start_idx:end_idx], use_container_width=True)
-else:
-    st.dataframe(final_df[final_display_columns], use_container_width=True)
+# 直接显示全部数据
+st.dataframe(final_df[final_display_columns], use_container_width=True)
 
 # 显示评分详情
 if score_details is not None and weights_info is not None:
@@ -726,18 +769,100 @@ if score_details is not None and weights_info is not None:
             detail_cols.extend([f'{col}_原始值', f'{col}_得分', f'{col}_权重'])
         detail_df = detail_df[detail_cols]
         
-        if total_pages > 1:
-            detail_start_idx = start_idx
-            detail_end_idx = end_idx
-            st.dataframe(detail_df.iloc[detail_start_idx:detail_end_idx], use_container_width=True, hide_index=True)
-        else:
-            st.dataframe(detail_df, use_container_width=True, hide_index=True)
+        # 直接显示全部评分详情
+        st.dataframe(detail_df, use_container_width=True, hide_index=True)
         st.caption("💡 说明：")
         st.caption("- 得分：0-10分，越高越好")
         st.caption("- 权重：该指标在总分中的占比（CRITIC客观权重）")
         st.caption("- 推荐分：通过TOPSIS计算得出")
 
 # 导出结果
+if len(final_df) > 0 and calculation_data is not None:
+    # 生成详细的Excel文件
+    import io
+    from io import BytesIO
+    
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # 1. 用户信息
+        user_info_df = pd.DataFrame({
+            'Item': ['Gender', 'Education', 'Political', 'Region', 'Major', 'WorkYears', 'Positions'],
+            'Value': [
+                calculation_data['user_info']['Gender'],
+                calculation_data['user_info']['Education'],
+                calculation_data['user_info']['Political'],
+                calculation_data['user_info']['Region'],
+                calculation_data['user_info']['Major'],
+                calculation_data['user_info']['WorkYears'],
+                calculation_data['user_info']['Positions']
+            ]
+        })
+        user_info_df.to_excel(writer, sheet_name='用户信息', index=False)
+        
+        # 2. 推荐岗位列表
+        position_list_df = final_df[final_display_columns].copy()
+        position_list_df.to_excel(writer, sheet_name='推荐岗位列表', index=False)
+        
+        # 3. CRITIC权重计算
+        all_cols = ['进面分数', '招考人数', '专业要求数', '机构层级', '学历匹配度', '备注限制数']
+        critic_df = pd.DataFrame({
+            'Indicator': all_cols,
+            'StdDev': [calculation_data['std_devs'].get(col, 0) for col in all_cols],
+            '1-CorrSum': [calculation_data['corr_terms'].get(col, 0) for col in all_cols],
+            'CRITIC': [calculation_data['critic_values'].get(col, 0) for col in all_cols],
+            'Weight': [calculation_data['final_weights'].get(col, 0) for col in all_cols],
+            'Weight%': [round(calculation_data['final_weights'].get(col, 0) * 100, 2) for col in all_cols]
+        })
+        critic_df.to_excel(writer, sheet_name='CRITIC权重计算', index=False)
+        
+        # 4. 原始指标
+        raw_df = calculation_data['raw_indicators'].copy()
+        raw_df.insert(0, '排名', range(1, len(raw_df) + 1))
+        raw_df.to_excel(writer, sheet_name='原始指标', index=False)
+        
+        # 5. 标准化指标
+        norm_df = calculation_data['normalized'].copy()
+        norm_df.insert(0, '排名', range(1, len(norm_df) + 1))
+        norm_df.to_excel(writer, sheet_name='标准化指标', index=False)
+        
+        # 6. 加权指标
+        weighted_df = calculation_data['weighted'].copy()
+        weighted_df.insert(0, '排名', range(1, len(weighted_df) + 1))
+        weighted_df.to_excel(writer, sheet_name='加权指标', index=False)
+        
+        # 7. TOPSIS计算
+        topsis_df = pd.DataFrame({
+            '排名': range(1, len(final_df) + 1),
+            'D+': calculation_data['d_positive'],
+            'D-': calculation_data['d_negative'],
+            'C': calculation_data['closeness'],
+            '推荐分': final_df['推荐分'].values
+        })
+        topsis_df.to_excel(writer, sheet_name='TOPSIS计算', index=False)
+        
+        # 8. 正负理想解
+        ideal_df = pd.DataFrame({
+            'Indicator': all_cols,
+            'PositiveIdeal': [calculation_data['positive_ideal'].get(col, 0) for col in all_cols],
+            'NegativeIdeal': [calculation_data['negative_ideal'].get(col, 0) for col in all_cols]
+        })
+        ideal_df.to_excel(writer, sheet_name='正负理想解', index=False)
+    
+    output.seek(0)
+    
+    if merge_option:
+        excel_file_name = f"岗位推荐详细计算_{selected_year}.xlsx"
+    else:
+        excel_file_name = f"岗位推荐详细计算_{selected_year}_{selected_sheet}.xlsx"
+    
+    st.download_button(
+        label="📥 下载详细计算结果（Excel）",
+        data=output,
+        file_name=excel_file_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+# 同时保留简单的CSV导出
 csv = final_df[final_display_columns].to_csv(index=False).encode('utf-8-sig')
 if merge_option:
     file_name = f"岗位筛选结果_{selected_year}.csv"
