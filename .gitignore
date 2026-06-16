@@ -18,12 +18,14 @@ venv/
 *.swp
 *.swo
 *~
+# 保留 data/cache 的 parquet 文件用于部署
 data/raw/
-data/cache/
 data/*.xlsx
 data/*.xls
+data/cache/scores.parquet
 *.xlsx
 *.xls
+!data/cache/positions_*.parquet
 *.pyc
 *.exe
 *.bat

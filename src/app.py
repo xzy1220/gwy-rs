@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import json
+import re
 
 st.set_page_config(
     page_title="公务员考试岗位个性化推荐系统",
@@ -97,6 +98,20 @@ def get_available_years():
                 if year.isdigit():
                     years.append(int(year))
     return sorted(years)
+
+@st.cache_data(ttl=3600)
+def build_major_category_map(df):
+    mapping = {}
+    majors = df['专业'].dropna().astype(str)
+    for m in majors:
+        parts = re.split(r'[，,；;、/\n\r]+', m)
+        parts = [p.strip() for p in parts if p.strip()]
+        cats = [p for p in parts if p.endswith('类') and len(p) <= 10]
+        specs = [p for p in parts if not p.endswith('类') and len(p) <= 20]
+        for cat in cats:
+            for spec in specs:
+                mapping.setdefault(spec, set()).add(cat)
+    return mapping
 
 @st.cache_data(ttl=1800, show_spinner="正在计算推荐分数...")
 def calculate_recommendation_scores(df, user_edu=None, user_pol=None, user_gender=None, selected_region=None, selected_major=None, selected_work_years=None):
@@ -422,6 +437,20 @@ if not merge_option:
     st.sidebar.info(f"📄 工作表: {selected_sheet}")
 
 st.sidebar.markdown("---")
+
+# 重置筛选按钮
+reset_col1, reset_col2 = st.sidebar.columns([1, 1])
+with reset_col1:
+    if st.button("🔄 重置筛选", use_container_width=True):
+        # 清除所有筛选相关的 session_state
+        for key in list(st.session_state.keys()):
+            if key.startswith(('filter_', 'text_search_', 'province_', 'city_', 'district_', 'slider_')):
+                del st.session_state[key]
+        st.session_state.current_page = 0
+        st.session_state.result_page = 0
+        st.rerun()
+
+st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 筛选选项")
 
 filtered_df = df.copy()
@@ -495,7 +524,21 @@ for col in allowed_columns:
     if col == "工作地点":
         # 工作地点三级筛选
         st.sidebar.markdown("### 📍 工作地点筛选")
-        
+
+        # ---- 工具函数：剥离省/自治区/直辖市前缀 ----
+        def _strip_province_prefix(loc_str):
+            """去掉「XX省」「XX自治区」「北京市」等前缀，返回剩余部分"""
+            # 按从长到短匹配，避免 "壮族自治区" 被 "自治区" 抢先匹配
+            for suffix in ['壮族自治区', '回族自治区', '维吾尔自治区', '自治区', '省']:
+                idx = loc_str.find(suffix)
+                if idx >= 0:
+                    return loc_str[idx + len(suffix):]
+            # 直辖市
+            for muni in ['北京市', '上海市', '天津市', '重庆市']:
+                if loc_str.startswith(muni):
+                    return loc_str[len(muni):]
+            return loc_str  # 无省级前缀
+
         def extract_province(loc):
             if pd.isna(loc):
                 return ""
@@ -508,17 +551,67 @@ for col in allowed_columns:
                 if prov in loc_str:
                     return prov
             return loc_str[:3] if len(loc_str) >= 3 else loc_str
-        
+
+        def extract_city(loc):
+            """提取城市名（不含省级前缀），如 '秦皇岛市'"""
+            if pd.isna(loc):
+                return ""
+            loc_str = str(loc)
+            # 直辖市直接返回市名
+            for muni in ['北京市', '上海市', '天津市', '重庆市']:
+                if loc_str.startswith(muni):
+                    return muni
+            rest = _strip_province_prefix(loc_str)
+            if not rest:
+                return ""
+            # 自治州优先（因为有的自治州名下含"市"字，如地级市名）
+            idx = rest.find('自治州')
+            if idx >= 0:
+                return rest[:idx + 3]
+            # 市 / 地区 / 盟
+            for term in ['市', '地区', '盟']:
+                idx = rest.find(term)
+                if idx >= 0:
+                    return rest[:idx + len(term)]
+            return ""
+
+        def extract_district(loc):
+            """提取区/县/旗名（不含省、市前缀），如 '海港区'"""
+            if pd.isna(loc):
+                return ""
+            loc_str = str(loc)
+            # 去掉省级前缀
+            for muni in ['北京市', '上海市', '天津市', '重庆市']:
+                if loc_str.startswith(muni):
+                    rest = loc_str[len(muni):]
+                    break
+            else:
+                rest = _strip_province_prefix(loc_str)
+            # 再去掉地级市/自治州前缀
+            for term in ['自治州', '地区', '市', '盟']:
+                idx = rest.find(term)
+                if idx >= 0:
+                    rest = rest[idx + len(term):]
+                    break
+            if not rest:
+                return ""
+            # 提取区 / 县 / 旗 / 县级市
+            for term in ['区', '县', '市', '旗']:
+                idx = rest.find(term)
+                if idx >= 0:
+                    return rest[:idx + 1]
+            return ""
+
         all_locations = df[col].dropna()
         provinces = sorted(list(set([extract_province(loc) for loc in all_locations if extract_province(loc)])))
-        
+
         selected_provinces = st.sidebar.multiselect(
             "选择省份（可多选）",
             options=provinces,
             default=[],
             key="province_select"
         )
-        
+
         if selected_provinces:
             def match_province(x):
                 x_str = str(x)
@@ -526,31 +619,22 @@ for col in allowed_columns:
             province_mask = filtered_df[col].apply(match_province)
             filtered_df = filtered_df[province_mask]
             selected_region = "、".join(selected_provinces)
-        
-        # 提取市
-        def extract_city(loc):
-            if pd.isna(loc):
-                return ""
-            loc_str = str(loc)
-            if "市" in loc_str:
-                city_end = loc_str.find("市") + 1
-                return loc_str[:city_end]
-            return ""
-        
+
+        # ---- 城市选择 ----
         if selected_provinces:
             city_locations = filtered_df[col].dropna()
         else:
             city_locations = all_locations
-        
+
         cities = sorted(list(set([extract_city(loc) for loc in city_locations if extract_city(loc)])))
-        
+
         selected_cities = st.sidebar.multiselect(
             "选择市（可多选）",
             options=cities,
             default=[],
             key="city_select"
         )
-        
+
         if selected_cities:
             def match_city(x):
                 x_str = str(x)
@@ -559,65 +643,131 @@ for col in allowed_columns:
             filtered_df = filtered_df[city_mask]
             cities_str = "、".join(selected_cities)
             if selected_region:
-                for prov in selected_provinces:
-                    cities_str = cities_str.replace(prov, "")
-                cities_str = cities_str.replace("、、", "、").strip("、")
                 selected_region += " " + cities_str
             else:
                 selected_region = cities_str
-        
-        # 提取区县
-        def extract_district(loc):
-            if pd.isna(loc):
-                return ""
-            loc_str = str(loc)
-            if "区" in loc_str:
-                district_end = loc_str.find("区") + 1
-                return loc_str[:district_end]
-            elif "县" in loc_str:
-                district_end = loc_str.find("县") + 1
-                return loc_str[:district_end]
-            return ""
-        
+
+        # ---- 区县选择 ----
         if selected_cities:
             district_locations = filtered_df[col].dropna()
         elif selected_provinces:
             district_locations = filtered_df[col].dropna()
         else:
             district_locations = all_locations
-        
-        districts = sorted(list(set([extract_district(loc) for loc in district_locations if extract_district(loc)])))
-        
+
+        # 构建区县选项：未选城市时加城市前缀消除歧义（如 "石家庄市-长安区" vs "西安市-长安区"）
+        raw_districts = [extract_district(loc) for loc in district_locations]
+        raw_districts = [d for d in raw_districts if d]
+        if selected_cities:
+            # 已选城市 → 直接用区县名
+            district_options = sorted(list(set(raw_districts)))
+            district_label = {d: d for d in district_options}
+        else:
+            # 未选城市 → 附加上级城市名，防止同名区县混淆
+            district_with_city = {}
+            for loc in district_locations:
+                d = extract_district(loc)
+                c = extract_city(loc)
+                if d and c:
+                    key = f"{c}-{d}"
+                    district_with_city[key] = (c, d)
+            district_options = sorted(district_with_city.keys())
+            district_label = {k: k for k in district_options}
+
         selected_districts = st.sidebar.multiselect(
             "选择县/区（可多选）",
-            options=districts,
+            options=district_options,
             default=[],
             key="district_select"
         )
-        
+
         if selected_districts:
             def match_district(x):
                 x_str = str(x)
-                return any(dist in x_str for dist in selected_districts)
+                for sel in selected_districts:
+                    if selected_cities:
+                        # 城市已选，区县名直接匹配 + 确认城市也匹配
+                        if sel in x_str and any(c in x_str for c in selected_cities):
+                            return True
+                    elif selected_provinces:
+                        # 有省无市，用 "市-区" 格式中的区县名匹配 + 确认省份匹配
+                        if '-' in sel:
+                            _, dist_name = sel.rsplit('-', 1)
+                        else:
+                            dist_name = sel
+                        if dist_name in x_str and any(p in x_str for p in selected_provinces):
+                            return True
+                    else:
+                        # 无省无市，用 "市-区" 格式中的城市和区县名同时匹配
+                        if '-' in sel:
+                            city_name, dist_name = sel.rsplit('-', 1)
+                            if city_name in x_str and dist_name in x_str:
+                                return True
+                        else:
+                            if sel in x_str:
+                                return True
+                return False
+
             district_mask = filtered_df[col].apply(match_district)
             filtered_df = filtered_df[district_mask]
+            # 显示时去掉城市前缀
+            display_districts = []
+            for sel in selected_districts:
+                display_districts.append(sel.rsplit('-', 1)[-1] if '-' in sel else sel)
             if selected_region:
-                selected_region += " " + "、".join(selected_districts)
+                selected_region += " " + "、".join(display_districts)
             else:
-                selected_region = "、".join(selected_districts)
-        
+                selected_region = "、".join(display_districts)
+
         st.sidebar.markdown("---")
     
     elif col in text_search_columns:
-        # 专业关键词搜索
+        # ---- 专业关键词搜索（可切换大类扩展） ----
+        st.sidebar.markdown(f"### 🔍 {col}筛选")
         search_value = st.sidebar.text_input(
-            f"{col}（关键词搜索）",
+            f"输入{col}关键词",
             value="",
-            key=f"text_search_{col}"
+            placeholder=f"例如：计算机、会计、法学...",
+            key=f"text_search_{col}",
+            help=f"输入{col}名称中的关键词，支持模糊匹配"
+        )
+        expand_cats = st.sidebar.checkbox(
+            "同时搜索专业大类",
+            value=True,
+            key=f"expand_cats_{col}",
+            help="开启后，搜索具体专业名时也会匹配写了该专业所属大类的岗位"
         )
         if search_value:
-            filtered_df = filtered_df[filtered_df[col].astype(str).str.contains(search_value, case=False, na=False)]
+            pre_search_df = filtered_df.copy()
+            # 1) 直接子串匹配
+            filtered_df = filtered_df[filtered_df[col].astype(str).str.contains(search_value, case=False, na=False, regex=False)]
             selected_major = search_value
+
+            # 2) 自动扩展到大类
+            if expand_cats:
+                major_map = build_major_category_map(df)
+                expanded_cats = set()
+                for spec_name, cats in major_map.items():
+                    if search_value in spec_name:
+                        expanded_cats.update(cats)
+                if expanded_cats:
+                    cat_match = pre_search_df[col].astype(str).apply(
+                        lambda x: any(cat in x for cat in expanded_cats)
+                    )
+                    new_indices = cat_match[cat_match].index.difference(filtered_df.index)
+                    if len(new_indices) > 0:
+                        filtered_df = pd.concat([filtered_df, pre_search_df.loc[new_indices]])
+                        st.sidebar.caption(f"🔗 扩展到：{'、'.join(sorted(expanded_cats))}（+{len(new_indices)} 个岗位）")
+
+        # 显示常用专业供参考
+        with st.sidebar.expander(f"📋 常用{col}参考"):
+            common_majors = df[col].dropna().unique()
+            common_majors = sorted([m for m in common_majors if len(str(m)) <= 20])[:30]
+            st.caption("点击可复制到搜索框：")
+            for m in common_majors:
+                if st.button(str(m), key=f"major_chip_{m}"):
+                    st.session_state[f"text_search_{col}"] = str(m)
+                    st.rerun()
     
     else:
         # 基层工作最低年限等
@@ -662,38 +812,84 @@ else:
     st.header(f"📋 {selected_year}年岗位数据 - {selected_sheet}")
 st.info(f"🔍 筛选结果: {len(filtered_df)} 个岗位")
 
-# 手动删除岗位模块
-if 'deleted_rows' not in st.session_state:
-    st.session_state.deleted_rows = set()
+# ==================== 手动删除岗位模块 ====================
+# 使用稳定唯一ID（职位代码+部门代码）替代整数索引，防止筛选变化后删错行
+if 'deleted_ids' not in st.session_state:
+    st.session_state.deleted_ids = set()
 
 if 'current_year' not in st.session_state or st.session_state.current_year != selected_year:
-    st.session_state.deleted_rows = set()
+    st.session_state.deleted_ids = set()
     st.session_state.current_year = selected_year
 
 if 'current_sheet' not in st.session_state or st.session_state.current_sheet != selected_sheet:
-    st.session_state.deleted_rows = set()
+    st.session_state.deleted_ids = set()
     st.session_state.current_sheet = selected_sheet
 
 display_df = filtered_df.copy()
 display_df = display_df.reset_index(drop=True)
 
-# 隐藏的列
-hide_columns = ['学历映射', '政治面貌映射', '专业要求数', '专业要求数_大专', '专业要求数_本科', '专业要求数_研究生', '专业要求数_博士', '机构层级映射', '备注限制数', '性别要求']
+# 生成唯一行ID（优先使用职位代码+部门代码，否则用行号）
+def make_row_id(row):
+    parts = []
+    if '职位代码' in row.index and pd.notna(row['职位代码']):
+        parts.append(str(row['职位代码']))
+    if '部门代码' in row.index and pd.notna(row['部门代码']):
+        parts.append(str(row['部门代码']))
+    if parts:
+        return '_'.join(parts)
+    return None
+
+display_df['_row_id'] = display_df.apply(make_row_id, axis=1)
+# 对于无法生成唯一ID的行，用"行号:"前缀区分
+null_id_mask = display_df['_row_id'].isna()
+display_df.loc[null_id_mask, '_row_id'] = 'row:' + display_df.loc[null_id_mask].index.astype(str)
+
+# 隐藏的列（加上内部ID列）
+hide_columns = ['学历映射', '政治面貌映射', '专业要求数', '专业要求数_大专', '专业要求数_本科',
+                '专业要求数_研究生', '专业要求数_博士', '机构层级映射', '备注限制数', '性别要求', '_row_id']
 if '工作表' in display_df.columns:
     hide_columns.append('工作表')
 
+# ==================== 分页控制 ====================
+PAGE_SIZE_OPTIONS = [20, 50, 100, 200]
+if 'page_size' not in st.session_state:
+    st.session_state.page_size = 50
+if 'current_page' not in st.session_state:
+    st.session_state.current_page = 0
+
 st.subheader("✂️ 手动删除岗位")
-st.caption("勾选要删除的岗位，然后点击'删除选中岗位'按钮")
+col_info, col_page, col_size = st.columns([2, 2, 1])
+with col_info:
+    st.caption("勾选要删除的岗位，然后点击'删除选中岗位'按钮")
+with col_size:
+    st.session_state.page_size = st.selectbox(
+        "每页显示", PAGE_SIZE_OPTIONS,
+        index=PAGE_SIZE_OPTIONS.index(st.session_state.page_size) if st.session_state.page_size in PAGE_SIZE_OPTIONS else 1,
+        key="page_size_select",
+        label_visibility="collapsed"
+    )
+
+# 计算分页
+total_rows = len(display_df)
+total_pages = max(1, (total_rows + st.session_state.page_size - 1) // st.session_state.page_size)
+if st.session_state.current_page >= total_pages:
+    st.session_state.current_page = 0
+
+start_idx = st.session_state.current_page * st.session_state.page_size
+end_idx = min(start_idx + st.session_state.page_size, total_rows)
 
 # 准备要显示的列
 display_columns = [col for col in display_df.columns if col not in hide_columns]
-# 添加选择删除列
-editor_df = display_df[display_columns].copy()
+editor_df = display_df[display_columns].iloc[start_idx:end_idx].copy()
 editor_df['选择删除'] = False
+
+# 预勾选已删除的行
+editor_df['选择删除'] = editor_df.index.map(lambda i: display_df.iloc[i]['_row_id'] in st.session_state.deleted_ids)
 
 edited_df = st.data_editor(
     editor_df,
     use_container_width=True,
+    num_rows="fixed",
     column_config={
         "选择删除": st.column_config.CheckboxColumn(
             "选择删除",
@@ -702,26 +898,45 @@ edited_df = st.data_editor(
         )
     },
     hide_index=True,
+    key=f"editor_{start_idx}"
 )
 
-col1, col2 = st.columns([1, 3])
-with col1:
-    delete_clicked = st.button("🗑️ 删除选中岗位", type="primary")
+# 分页导航 + 操作按钮
+nav_col1, nav_col2, nav_col3, nav_col4, nav_col5 = st.columns([1, 1, 2, 1, 1])
+with nav_col1:
+    if st.button("◀ 上一页", disabled=(st.session_state.current_page == 0)):
+        st.session_state.current_page = max(0, st.session_state.current_page - 1)
+        st.rerun()
+with nav_col2:
+    if st.button("下一页 ▶", disabled=(st.session_state.current_page >= total_pages - 1)):
+        st.session_state.current_page = min(total_pages - 1, st.session_state.current_page + 1)
+        st.rerun()
+with nav_col3:
+    st.caption(f"第 {st.session_state.current_page + 1}/{total_pages} 页，共 {total_rows} 条")
+with nav_col4:
+    delete_clicked = st.button("🗑️ 删除选中", type="primary")
     if delete_clicked:
-        rows_to_delete = edited_df[edited_df['选择删除']].index.tolist()
-        if rows_to_delete:
-            for idx in rows_to_delete:
-                st.session_state.deleted_rows.add(idx)
-            st.success(f"已删除 {len(rows_to_delete)} 个岗位！")
-            try:
-                st.rerun()
-            except AttributeError:
-                st.experimental_rerun()
+        ids_to_delete = set()
+        for _, row in edited_df.iterrows():
+            if row['选择删除']:
+                orig_idx = row.name  # editor_df 保留了 display_df 的 index
+                ids_to_delete.add(display_df.iloc[orig_idx]['_row_id'])
+        if ids_to_delete:
+            st.session_state.deleted_ids.update(ids_to_delete)
+            st.success(f"已删除 {len(ids_to_delete)} 个岗位！")
+            st.rerun()
         else:
             st.warning("请先勾选要删除的岗位！")
+with nav_col5:
+    reset_delete = st.button("🔄 重置删除")
+    if reset_delete:
+        st.session_state.deleted_ids = set()
+        st.session_state.current_page = 0
+        st.rerun()
 
-# 最终数据
-final_df = display_df[~display_df.index.isin(st.session_state.deleted_rows)]
+# 应用删除：用 row_id 过滤
+final_df = display_df[~display_df['_row_id'].isin(st.session_state.deleted_ids)].copy()
+final_df = final_df.drop(columns=['_row_id'])
 
 # 计算推荐分数
 score_details = None
@@ -738,8 +953,33 @@ st.markdown("---")
 st.subheader(f"📊 最终结果（{len(final_df)} 个岗位）")
 final_display_columns = [col for col in final_df.columns if col not in hide_columns]
 
-# 直接显示全部数据
-st.dataframe(final_df[final_display_columns], use_container_width=True)
+# 分页显示最终结果
+if len(final_df) > 0:
+    result_page_size = st.session_state.page_size
+    result_total_pages = max(1, (len(final_df) + result_page_size - 1) // result_page_size)
+    if 'result_page' not in st.session_state:
+        st.session_state.result_page = 0
+    if st.session_state.result_page >= result_total_pages:
+        st.session_state.result_page = 0
+
+    r_start = st.session_state.result_page * result_page_size
+    r_end = min(r_start + result_page_size, len(final_df))
+
+    st.dataframe(final_df[final_display_columns].iloc[r_start:r_end], use_container_width=True)
+
+    rnav1, rnav2, rnav3 = st.columns([1, 1, 3])
+    with rnav1:
+        if st.button("◀ 上一页", key="result_prev", disabled=(st.session_state.result_page == 0)):
+            st.session_state.result_page = max(0, st.session_state.result_page - 1)
+            st.rerun()
+    with rnav2:
+        if st.button("下一页 ▶", key="result_next", disabled=(st.session_state.result_page >= result_total_pages - 1)):
+            st.session_state.result_page = min(result_total_pages - 1, st.session_state.result_page + 1)
+            st.rerun()
+    with rnav3:
+        st.caption(f"第 {st.session_state.result_page + 1}/{result_total_pages} 页")
+else:
+    st.warning("没有符合条件的岗位！")
 
 # 显示评分详情
 if score_details is not None and weights_info is not None:
@@ -766,127 +1006,109 @@ if score_details is not None and weights_info is not None:
                 row[f'{col}_得分'] = detail[f'{col}_得分']
                 row[f'{col}_权重'] = detail[f'{col}_权重']
             detail_rows.append(row)
-        
+
         detail_df = pd.DataFrame(detail_rows)
         detail_cols = ['排名', '推荐分']
         for col in ['进面分数', '招考人数', '专业要求数', '机构层级', '学历匹配度', '备注限制数']:
             detail_cols.extend([f'{col}_原始值', f'{col}_得分', f'{col}_权重'])
         detail_df = detail_df[detail_cols]
-        
-        # 直接显示全部评分详情
-        st.dataframe(detail_df, use_container_width=True, hide_index=True)
+
+        # 分页显示评分详情
+        d_start = st.session_state.result_page * result_page_size
+        d_end = min(d_start + result_page_size, len(detail_df))
+        st.dataframe(detail_df.iloc[d_start:d_end], use_container_width=True, hide_index=True)
+        st.caption(f"显示第 {d_start + 1}-{d_end} 条（共 {len(detail_df)} 条）")
         st.caption("💡 说明：")
         st.caption("- 得分：0-10分，越高越好")
         st.caption("- 权重：该指标在总分中的占比（CRITIC客观权重）")
         st.caption("- 推荐分：通过TOPSIS计算得出")
 
-# 导出结果
-if len(final_df) > 0 and calculation_data is not None:
-    # 生成详细的Excel文件
-    import io
+# ==================== 导出结果 ====================
+if len(final_df) > 0:
     from io import BytesIO
-    
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # 1. 用户信息
-        user_info_df = pd.DataFrame({
-            'Item': ['Gender', 'Education', 'Political', 'Region', 'Major', 'WorkYears', 'Positions'],
-            'Value': [
-                calculation_data['user_info']['Gender'],
-                calculation_data['user_info']['Education'],
-                calculation_data['user_info']['Political'],
-                calculation_data['user_info']['Region'],
-                calculation_data['user_info']['Major'],
-                calculation_data['user_info']['WorkYears'],
-                calculation_data['user_info']['Positions']
-            ]
-        })
-        user_info_df.to_excel(writer, sheet_name='用户信息', index=False)
-        
-        # 2. 推荐岗位列表
-        position_list_df = final_df[final_display_columns].copy()
-        position_list_df.to_excel(writer, sheet_name='推荐岗位列表', index=False)
-        
-        # 3. CRITIC权重计算
-        all_cols = ['进面分数', '招考人数', '专业要求数', '机构层级', '学历匹配度', '备注限制数']
-        critic_df = pd.DataFrame({
-            'Indicator': all_cols,
-            'StdDev': [round(calculation_data['std_devs'].get(col, 0), 4) for col in all_cols],
-            '1-CorrSum': [round(calculation_data['corr_terms'].get(col, 0), 4) for col in all_cols],
-            'CRITIC': [round(calculation_data['critic_values'].get(col, 0), 4) for col in all_cols],
-            'Weight': [round(calculation_data['final_weights'].get(col, 0), 4) for col in all_cols],
-            'Weight%': [round(calculation_data['final_weights'].get(col, 0) * 100, 4) for col in all_cols]
-        })
-        critic_df.to_excel(writer, sheet_name='CRITIC权重计算', index=False)
-        
-        # 4. 原始指标
-        raw_df = calculation_data['raw_indicators'].copy().round(4)
-        raw_df.insert(0, '排名', range(1, len(raw_df) + 1))
-        raw_df.to_excel(writer, sheet_name='原始指标', index=False)
-        
-        # 5. 标准化指标
-        norm_df = calculation_data['normalized'].copy().round(4)
-        norm_df.insert(0, '排名', range(1, len(norm_df) + 1))
-        norm_df.to_excel(writer, sheet_name='标准化指标', index=False)
-        
-        # 6. 加权指标
-        weighted_df = calculation_data['weighted'].copy().round(4)
-        weighted_df.insert(0, '排名', range(1, len(weighted_df) + 1))
-        weighted_df.to_excel(writer, sheet_name='加权指标', index=False)
-        
-        # 7. TOPSIS计算
-        topsis_df = pd.DataFrame({
-            '排名': range(1, len(final_df) + 1),
-            'D+': calculation_data['d_positive'].round(4),
-            'D-': calculation_data['d_negative'].round(4),
-            'C': calculation_data['closeness'].round(4),
-            '推荐分': final_df['推荐分'].values
-        })
-        topsis_df.to_excel(writer, sheet_name='TOPSIS计算', index=False)
-        
-        # 8. 正负理想解
-        ideal_df = pd.DataFrame({
-            'Indicator': all_cols,
-            'PositiveIdeal': [round(calculation_data['positive_ideal'].get(col, 0), 4) for col in all_cols],
-            'NegativeIdeal': [round(calculation_data['negative_ideal'].get(col, 0), 4) for col in all_cols]
-        })
-        ideal_df.to_excel(writer, sheet_name='正负理想解', index=False)
-    
-    output.seek(0)
-    
-    if merge_option:
-        excel_file_name = f"岗位推荐详细计算_{selected_year}.xlsx"
-    else:
-        excel_file_name = f"岗位推荐详细计算_{selected_year}_{selected_sheet}.xlsx"
-    
+
+    # ---- 简洁导出：推荐岗位列表 (Excel) ----
+    simple_output = BytesIO()
+    with pd.ExcelWriter(simple_output, engine='openpyxl') as writer:
+        final_df[final_display_columns].to_excel(writer, sheet_name='推荐岗位列表', index=False)
+
+    simple_output.seek(0)
+    simple_name = f"岗位推荐结果_{selected_year}.xlsx" if merge_option else f"岗位推荐结果_{selected_year}_{selected_sheet}.xlsx"
+
     st.download_button(
-        label="📥 下载详细计算结果（Excel）",
-        data=output,
-        file_name=excel_file_name,
+        label="📥 下载推荐结果（Excel）",
+        data=simple_output,
+        file_name=simple_name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-# 同时保留简单的CSV导出
-csv = final_df[final_display_columns].to_csv(index=False).encode('utf-8-sig')
-if merge_option:
-    file_name = f"岗位筛选结果_{selected_year}.csv"
-else:
-    file_name = f"岗位筛选结果_{selected_year}_{selected_sheet}.csv"
-st.download_button(
-    label="📥 下载最终结果（CSV）",
-    data=csv,
-    file_name=file_name,
-    mime='text/csv'
-)
+    # ---- CSV 导出 ----
+    csv_data = final_df[final_display_columns].to_csv(index=False).encode('utf-8-sig')
+    csv_name = f"岗位筛选结果_{selected_year}.csv" if merge_option else f"岗位筛选结果_{selected_year}_{selected_sheet}.csv"
+    st.download_button(
+        label="📥 下载结果（CSV）",
+        data=csv_data,
+        file_name=csv_name,
+        mime='text/csv'
+    )
 
-# 重置删除
-reset_clicked = st.button("🔄 重置所有删除")
-if reset_clicked:
-    st.session_state.deleted_rows = set()
-    try:
-        st.rerun()
-    except AttributeError:
-        st.experimental_rerun()
+    # ---- 高级导出：完整计算过程（折叠在 expander 中） ----
+    if calculation_data is not None:
+        with st.expander("📊 高级导出：完整 CRITIC-TOPSIS 计算数据", expanded=False):
+            st.caption("包含所有计算中间步骤，适合论文/研究分析")
+            all_cols = ['进面分数', '招考人数', '专业要求数', '机构层级', '学历匹配度', '备注限制数']
+
+            full_output = BytesIO()
+            with pd.ExcelWriter(full_output, engine='openpyxl') as writer:
+                # 用户信息
+                pd.DataFrame({
+                    'Item': ['Gender', 'Education', 'Political', 'Region', 'Major', 'WorkYears', 'Positions'],
+                    'Value': [calculation_data['user_info'][k] for k in ['Gender', 'Education', 'Political', 'Region', 'Major', 'WorkYears', 'Positions']]
+                }).to_excel(writer, sheet_name='用户信息', index=False)
+
+                # 推荐岗位列表
+                final_df[final_display_columns].to_excel(writer, sheet_name='推荐岗位列表', index=False)
+
+                # CRITIC权重
+                pd.DataFrame({
+                    'Indicator': all_cols,
+                    'StdDev': [round(calculation_data['std_devs'].get(col, 0), 4) for col in all_cols],
+                    '1-CorrSum': [round(calculation_data['corr_terms'].get(col, 0), 4) for col in all_cols],
+                    'CRITIC': [round(calculation_data['critic_values'].get(col, 0), 4) for col in all_cols],
+                    'Weight': [round(calculation_data['final_weights'].get(col, 0), 4) for col in all_cols],
+                    'Weight%': [round(calculation_data['final_weights'].get(col, 0) * 100, 4) for col in all_cols]
+                }).to_excel(writer, sheet_name='CRITIC权重计算', index=False)
+
+                # 标准化指标
+                norm_df = calculation_data['normalized'].copy().round(4)
+                norm_df.insert(0, '排名', range(1, len(norm_df) + 1))
+                norm_df.to_excel(writer, sheet_name='标准化指标', index=False)
+
+                # TOPSIS
+                pd.DataFrame({
+                    '排名': range(1, len(final_df) + 1),
+                    'D+': calculation_data['d_positive'].round(4),
+                    'D-': calculation_data['d_negative'].round(4),
+                    'C': calculation_data['closeness'].round(4),
+                    '推荐分': final_df['推荐分'].values
+                }).to_excel(writer, sheet_name='TOPSIS计算', index=False)
+
+                # 正负理想解
+                pd.DataFrame({
+                    'Indicator': all_cols,
+                    'PositiveIdeal': [round(calculation_data['positive_ideal'].get(col, 0), 4) for col in all_cols],
+                    'NegativeIdeal': [round(calculation_data['negative_ideal'].get(col, 0), 4) for col in all_cols]
+                }).to_excel(writer, sheet_name='正负理想解', index=False)
+
+            full_output.seek(0)
+            full_name = f"岗位推荐完整计算_{selected_year}.xlsx" if merge_option else f"岗位推荐完整计算_{selected_year}_{selected_sheet}.xlsx"
+
+            st.download_button(
+                label="📥 下载完整计算数据（含所有中间步骤）",
+                data=full_output,
+                file_name=full_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 st.markdown("---")
-st.caption("💡 提示：在左侧边栏选择年份、工作表和筛选条件，然后可以手动勾选删除不符合要求的岗位！")
+st.caption("💡 提示：在左侧边栏设置筛选条件和个人信息，系统会自动匹配并推荐最合适的岗位！")
